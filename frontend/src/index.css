@@ -198,3 +198,174 @@ img {
   top: 50%;
   transform: translate(-50%, -50%);
 }
+
+.mainPageTopBar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.mainPageActions {
+  display: flex;
+  gap: 8px;
+}
+
+.authPage {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background: #f6f7fb;
+}
+
+.authCard {
+  width: min(420px, 90vw);
+  background: white;
+  border: 1px solid #d8dbe6;
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.08);
+}
+
+.authCard form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.authCard label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.authCard input {
+  padding: 8px;
+}
+
+.authSubmitButton {
+  background: #5f8bff;
+  color: white;
+}
+
+.authSwitchButton {
+  background: #eef2ff;
+}
+
+.authError {
+  color: #b42318;
+}
+
+.historyPage {
+  padding: 16px;
+  background: #f8f9fd;
+  overflow: auto;
+}
+
+.historyHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.historyNavActions {
+  display: flex;
+  gap: 8px;
+}
+
+.historyStats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.historyStatCard {
+  background: white;
+  border: 1px solid #d8dbe6;
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.historyError {
+  color: #b42318;
+}
+
+.historyBody {
+  display: grid;
+  grid-template-columns: minmax(400px, 1fr) minmax(450px, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.historyListPanel,
+.historyDetailPanel {
+  background: white;
+  border: 1px solid #d8dbe6;
+  border-radius: 10px;
+  padding: 12px;
+}
+
+.historyTable {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.historyTable th,
+.historyTable td {
+  border-bottom: 1px solid #eceef5;
+  padding: 8px;
+  text-align: left;
+}
+
+.historyParticipants ul {
+  margin-top: 6px;
+  margin-bottom: 10px;
+  padding-left: 18px;
+}
+
+.historyOperationsSection {
+  border-top: 1px solid #eceef5;
+  margin-top: 8px;
+  padding-top: 8px;
+}
+
+.historyOperationList {
+  display: grid;
+  gap: 6px;
+  max-height: 260px;
+  overflow: auto;
+}
+
+.historyOperationItem {
+  display: grid;
+  grid-template-columns: 65px 1fr 1fr 1.3fr;
+  gap: 6px;
+  border: 1px solid #d8dbe6;
+  border-radius: 8px;
+  background: white;
+  padding: 8px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.historyOperationItem.active {
+  border-color: #5f8bff;
+  background: #eef2ff;
+}
+
+.historyOperationSnapshot {
+  margin-top: 10px;
+}
+
+.historyOperationSnapshot pre {
+  background: #0f172a;
+  color: #f8fafc;
+  border-radius: 8px;
+  padding: 10px;
+  overflow: auto;
+  max-height: 280px;
+}

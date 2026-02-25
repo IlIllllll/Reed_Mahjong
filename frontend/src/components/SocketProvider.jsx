@@ -1,6 +1,6 @@
 import { w3cwebsocket as W3CWebSocket } from "websocket";
 import React, { createContext, useContext, useEffect, useState } from "react";
-import { useUsername } from "./UsernameProvider";
+import { useAuth, useUsername } from "./UsernameProvider";
 import { nanoid } from "nanoid";
 
 // create SocketContext with value = the socket instance
@@ -16,32 +16,36 @@ export const useSocket = () => useContext(SocketContext);
 export const SocketProvider = ({ children }) => {
   const URL = "ws://localhost:8000/ws/socket-server";
   const [socket, setSocket] = useState(null);
-
+  const { token, isAuthenticated } = useAuth();
   const username = useUsername();
 
   useEffect(() => {
+    if (!isAuthenticated || !token || !username) {
+      setSocket(null);
+      return undefined;
+    }
     // initialize socket instance
-    const newSocket = new WebSocketInstance(URL, username);
+    const newSocket = new WebSocketInstance(URL, username, token);
     setSocket(newSocket);
 
     // this is the cleanup function, it will be called when the component unmounts (ideally never)
     return () => newSocket.disconnect();
-  }, [username]);
+  }, [isAuthenticated, token, username]);
 
   return (
     <SocketContext.Provider value={socket}>
-      {socket && children}
-      {/* conditionally render the child components only when the socket state is not null. */}
+      {children}
     </SocketContext.Provider>
   );
 };
 
 // Create cleaner interface for websocket interface interaction on frontend
 class WebSocketInstance {
-  constructor(URL, username) {
+  constructor(URL, username, authToken) {
     this.socketRef = new W3CWebSocket(URL);
     this.readyState = this.socketRef.readyState;
     this.username = username;
+    this.authToken = authToken;
     this.addCallbacks();
     this.addListener();
   }
@@ -55,7 +59,9 @@ class WebSocketInstance {
 
   // never used
   disconnect() {
-    this.socketRef.close();
+    if (this.socketRef) {
+      this.socketRef.close();
+    }
   }
 
   // used once during initialization
@@ -76,6 +82,7 @@ class WebSocketInstance {
       const newmessage = {
         ...message,
         username: this.username,
+        auth_token: this.authToken,
       };
       console.log("send message", newmessage);
       this.socketRef.send(JSON.stringify(newmessage));

@@ -79,6 +79,59 @@ class PlayerAdmin(admin.ModelAdmin):
     )
 
 
+class UserScoreProfileAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "user",
+        "total_score",
+        "wins",
+        "losses",
+        "draws",
+        "games_played",
+        "updated_at",
+    )
+
+
+class GameHistoryAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "room_id_snapshot",
+        "status",
+        "winner",
+        "started_at",
+        "ended_at",
+    )
+    search_fields = ("room_id_snapshot",)
+
+
+class GameParticipantResultAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "game_history",
+        "username_snapshot",
+        "result",
+        "score_delta",
+        "total_score_after_game",
+    )
+    search_fields = ("username_snapshot",)
+
+
+class GameOperationAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "game_history",
+        "sequence",
+        "operation_type",
+        "actor_username",
+        "created_at",
+    )
+    search_fields = ("operation_type", "actor_username")
+
+
 # Register your models here.
 admin.site.register(Room, RoomAdmin)
 admin.site.register(Player, PlayerAdmin)
+admin.site.register(UserScoreProfile, UserScoreProfileAdmin)
+admin.site.register(GameHistory, GameHistoryAdmin)
+admin.site.register(GameParticipantResult, GameParticipantResultAdmin)
+admin.site.register(GameOperation, GameOperationAdmin)
