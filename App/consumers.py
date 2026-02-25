@@ -3,10 +3,23 @@
 
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
 from channels.db import database_sync_to_async
-from .models import *
 from asgiref.sync import sync_to_async
+from django.contrib.auth.models import User
+from django.db import transaction
+from django.db.models import Max
 from django.db.utils import IntegrityError
+from django.utils import timezone
 import random
+
+from .auth_utils import get_user_from_token
+from .models import (
+    GameHistory,
+    GameOperation,
+    GameParticipantResult,
+    Player,
+    Room,
+    UserScoreProfile,
+)
 
 numbers = ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
 suites = ["bamboo", "wan", "circle"]
@@ -41,6 +54,8 @@ convert_table = {
     "circle8": 28,
     "circle9": 29,
 }
+
+tile_keys = list(convert_table.keys())
 
 
 """
@@ -96,6 +111,16 @@ class PlayerConsumer(AsyncJsonWebsocketConsumer):
 
         room_id = content.get("room_id")
         event_type = content.get("type")
+        if event_type is None:
+            await self.send_json({"message": "missing event type", "status": "400"})
+            return
+
+        if event_type != "echo":
+            user = await self.authenticate_event(content)
+            if user is None:
+                return
+            content["username"] = user.username
+
         if event_type == "echo":
             await self.send_json(content)
         elif event_type == "create_room":
@@ -327,6 +352,19 @@ class PlayerConsumer(AsyncJsonWebsocketConsumer):
                     room.current_player = zhuangjia
                     room.zhuangjia = zhuangjia
                     await sync_to_async(room.save)()
+                    await self.create_game_history(
+                        room_id=str(room_id),
+                        participants=players,
+                    )
+                    await self.record_game_operation(
+                        room_id=room_id,
+                        operation_type="START_GAME",
+                        actor_username=zhuangjia,
+                        payload={
+                            "zhuangjia": zhuangjia,
+                            "players": players,
+                        },
+                    )
 
                     # distribute 13 tiles to each player
                     for player in players:
@@ -368,6 +406,14 @@ class PlayerConsumer(AsyncJsonWebsocketConsumer):
                                 "status": "202",
                             },
                         )
+                        await self.record_game_operation(
+                            room_id=room_id,
+                            operation_type="START_TILES",
+                            actor_username=player,
+                            payload={
+                                "tiles": tiles,
+                            },
+                        )
 
                     # distribute 1 tiles to first player
                     player_result = await self.filter_player_models(zhuangjia)
@@ -401,6 +447,15 @@ class PlayerConsumer(AsyncJsonWebsocketConsumer):
                             "status": "202",
                         },
                     )
+                    await self.record_game_operation(
+                        room_id=room_id,
+                        operation_type="DRAW_TILE",
+                        actor_username=room.zhuangjia,
+                        payload={
+                            "tile": new_tile,
+                            "is_initial_draw": True,
+                        },
+                    )
 
                     # announce start game to all players
                     # ? maybe not necessary?
@@ -413,6 +468,14 @@ class PlayerConsumer(AsyncJsonWebsocketConsumer):
                             "room_id": str(room_id),
                             "result_type": "start_game",
                             "status": "202",
+                        },
+                    )
+                    await self.record_game_operation(
+                        room_id=room_id,
+                        operation_type="GAME_STARTED_BROADCAST",
+                        actor_username=room.current_player,
+                        payload={
+                            "current_player": room.current_player,
                         },
                     )
             else:
@@ -429,6 +492,14 @@ class PlayerConsumer(AsyncJsonWebsocketConsumer):
             room = await sync_to_async(room_result.first)()
 
             if room.game_mode == 1:
+                finalized_result = await self.finalize_game_result(room_id)
+                if finalized_result is not None:
+                    await self.record_game_operation_by_game_id(
+                        game_history_id=finalized_result["game_id"],
+                        room_id=room_id,
+                        operation_type="GAME_RESET_DRAW",
+                        payload={"score_delta": finalized_result["score_delta"]},
+                    )
                 """
                 more checking condition
                 if a player declares a win, the game is over
@@ -559,9 +630,33 @@ class PlayerConsumer(AsyncJsonWebsocketConsumer):
                         "status": "202",
                     },
                 )
+                await self.record_game_operation(
+                    room_id=room_id,
+                    operation_type="DRAW_TILE",
+                    actor_username=player1.player_id,
+                    payload={
+                        "tile": new_tile,
+                        "current_player": room.current_player,
+                    },
+                )
 
             else:
                 print("Out of tiles")
+                await self.record_game_operation(
+                    room_id=room_id,
+                    operation_type="OUT_OF_TILES",
+                    payload={"message": "No tiles left in wall."},
+                )
+                finalized_result = await self.finalize_game_result(room_id)
+                if finalized_result is not None:
+                    await self.record_game_operation_by_game_id(
+                        game_history_id=finalized_result["game_id"],
+                        room_id=room_id,
+                        operation_type="GAME_DRAW",
+                        payload={
+                            "score_delta": finalized_result["score_delta"],
+                        },
+                    )
                 await self.reset_game(room_id)
                 await self.send_json({"message": "out of tiles", "status": "400"})
         except Room.DoesNotExist:
@@ -608,6 +703,15 @@ class PlayerConsumer(AsyncJsonWebsocketConsumer):
                     "room_id": str(room_id),
                     "result_type": "discard_tile",
                     "status": "202",
+                },
+            )
+            await self.record_game_operation(
+                room_id=room_id,
+                operation_type="DISCARD_TILE",
+                actor_username=content.get("username"),
+                payload={
+                    "tile": content.get("tile"),
+                    "next_player": room.current_player,
                 },
             )
 
@@ -719,6 +823,15 @@ class PlayerConsumer(AsyncJsonWebsocketConsumer):
                             "status": "202",
                         },
                     )
+                    await self.record_game_operation(
+                        room_id=room_id,
+                        operation_type="HU_PROMPT",
+                        actor_username=player,
+                        payload={
+                            "tile": content.get("tile"),
+                            "triggered_by": content.get("username"),
+                        },
+                    )
                     return "successful"
 
             print("No one can perform hu")
@@ -759,6 +872,26 @@ class PlayerConsumer(AsyncJsonWebsocketConsumer):
                 room.current_player = content.get("username")
                 await sync_to_async(player1.save)()
                 await sync_to_async(room.save)()
+                await self.record_game_operation(
+                    room_id=room_id,
+                    operation_type="HU_ACCEPTED",
+                    actor_username=content.get("username"),
+                    payload={"tile": content.get("tile")},
+                )
+                finalized_result = await self.finalize_game_result(
+                    room_id=room_id, winner_username=content.get("username")
+                )
+                if finalized_result is not None:
+                    await self.record_game_operation_by_game_id(
+                        game_history_id=finalized_result["game_id"],
+                        room_id=room_id,
+                        operation_type="GAME_FINISHED",
+                        actor_username=content.get("username"),
+                        payload={
+                            "winner": content.get("username"),
+                            "score_delta": finalized_result["score_delta"],
+                        },
+                    )
 
                 await self.channel_layer.group_send(
                     self.room_name,
@@ -778,6 +911,12 @@ class PlayerConsumer(AsyncJsonWebsocketConsumer):
 
             else:
                 print("Player not performing hu")
+                await self.record_game_operation(
+                    room_id=room_id,
+                    operation_type="HU_REJECTED",
+                    actor_username=content.get("username"),
+                    payload={"tile": content.get("tile")},
+                )
                 await self.check_peng(
                     room_id, uid=room.current_player, suite=suite, number=number
                 )
@@ -827,6 +966,15 @@ class PlayerConsumer(AsyncJsonWebsocketConsumer):
                             "status": "202",
                         },
                     )
+                    await self.record_game_operation(
+                        room_id=room_id,
+                        operation_type="PENG_PROMPT",
+                        actor_username=player,
+                        payload={
+                            "tile": {"suite": suite, "number": str(number)},
+                            "triggered_by": uid,
+                        },
+                    )
                     return "successful"
 
             print("No one can perform peng")
@@ -868,6 +1016,12 @@ class PlayerConsumer(AsyncJsonWebsocketConsumer):
                 room.current_player = content.get("username")
                 await sync_to_async(player1.save)()
                 await sync_to_async(room.save)()
+                await self.record_game_operation(
+                    room_id=room_id,
+                    operation_type="PENG_ACCEPTED",
+                    actor_username=content.get("username"),
+                    payload={"tile": content.get("tile")},
+                )
 
                 await self.channel_layer.group_send(
                     self.room_name,
@@ -885,6 +1039,12 @@ class PlayerConsumer(AsyncJsonWebsocketConsumer):
 
             else:
                 print("Player not performing peng")
+                await self.record_game_operation(
+                    room_id=room_id,
+                    operation_type="PENG_REJECTED",
+                    actor_username=content.get("username"),
+                    payload={"tile": content.get("tile")},
+                )
 
                 await self.check_chi(
                     room_id, uid=room.current_player, suite=suite, number=number
@@ -954,6 +1114,12 @@ class PlayerConsumer(AsyncJsonWebsocketConsumer):
                             "status": "202",
                         },
                     )
+                    await self.record_game_operation(
+                        room_id=room_id,
+                        operation_type="CHI_PROMPT",
+                        actor_username=player1.player_id,
+                        payload={"tile": {"suite": suite, "number": str(number)}},
+                    )
                     return "successful"
 
             elif int(number) == 2:
@@ -976,6 +1142,12 @@ class PlayerConsumer(AsyncJsonWebsocketConsumer):
                             "result_type": "chi_prompt",
                             "status": "202",
                         },
+                    )
+                    await self.record_game_operation(
+                        room_id=room_id,
+                        operation_type="CHI_PROMPT",
+                        actor_username=player1.player_id,
+                        payload={"tile": {"suite": suite, "number": str(number)}},
                     )
                     return "successful"
 
@@ -1000,6 +1172,12 @@ class PlayerConsumer(AsyncJsonWebsocketConsumer):
                             "status": "202",
                         },
                     )
+                    await self.record_game_operation(
+                        room_id=room_id,
+                        operation_type="CHI_PROMPT",
+                        actor_username=player1.player_id,
+                        payload={"tile": {"suite": suite, "number": str(number)}},
+                    )
                     return "successful"
 
             elif int(number) == 1:
@@ -1020,6 +1198,12 @@ class PlayerConsumer(AsyncJsonWebsocketConsumer):
                             "status": "202",
                         },
                     )
+                    await self.record_game_operation(
+                        room_id=room_id,
+                        operation_type="CHI_PROMPT",
+                        actor_username=player1.player_id,
+                        payload={"tile": {"suite": suite, "number": str(number)}},
+                    )
                     return "successful"
             elif int(number) == 9:
                 key1 = suite + str(7)
@@ -1037,6 +1221,12 @@ class PlayerConsumer(AsyncJsonWebsocketConsumer):
                             "result_type": "chi_prompt",
                             "status": "202",
                         },
+                    )
+                    await self.record_game_operation(
+                        room_id=room_id,
+                        operation_type="CHI_PROMPT",
+                        actor_username=player1.player_id,
+                        payload={"tile": {"suite": suite, "number": str(number)}},
                     )
                     return "successful"
 
@@ -1069,6 +1259,12 @@ class PlayerConsumer(AsyncJsonWebsocketConsumer):
                 room.current_player = content.get("username")
                 await sync_to_async(player1.save)()
                 await sync_to_async(room.save)()
+                await self.record_game_operation(
+                    room_id=room_id,
+                    operation_type="CHI_ACCEPTED",
+                    actor_username=content.get("username"),
+                    payload={"tile": content.get("tile")},
+                )
 
                 await self.channel_layer.group_send(
                     self.room_name,
@@ -1088,6 +1284,12 @@ class PlayerConsumer(AsyncJsonWebsocketConsumer):
                 print(
                     "Player not performing chi, drawing tile for "
                     + str(room.current_player)
+                )
+                await self.record_game_operation(
+                    room_id=room_id,
+                    operation_type="CHI_REJECTED",
+                    actor_username=content.get("username"),
+                    payload={"tile": content.get("tile")},
                 )
                 await self.draw_tile(room_id, room.current_player)
 
@@ -1135,3 +1337,217 @@ class PlayerConsumer(AsyncJsonWebsocketConsumer):
     @database_sync_to_async
     def filter_player_models_room(self, room_id):
         return Player.objects.filter(room__room_id=room_id)
+
+    async def authenticate_event(self, content):
+        token = content.get("auth_token")
+        if token is None:
+            await self.send_json({"message": "Authentication required.", "status": "401"})
+            return None
+
+        user = await self.get_authenticated_user(token)
+        if user is None:
+            await self.send_json({"message": "Invalid or expired token.", "status": "401"})
+            return None
+        return user
+
+    @database_sync_to_async
+    def get_authenticated_user(self, token):
+        return get_user_from_token(token)
+
+    @database_sync_to_async
+    def create_game_history(self, room_id, participants):
+        room = Room.objects.filter(room_id=room_id).first()
+        game_history = GameHistory.objects.create(
+            room=room,
+            room_id_snapshot=str(room_id),
+            participants=[player for player in participants if player],
+            status=GameHistory.STATUS_IN_PROGRESS,
+        )
+        return game_history.id
+
+    @database_sync_to_async
+    def get_active_game_history_id(self, room_id):
+        game_history = (
+            GameHistory.objects.filter(
+                room_id_snapshot=str(room_id),
+                status=GameHistory.STATUS_IN_PROGRESS,
+            )
+            .order_by("-id")
+            .first()
+        )
+        if game_history is None:
+            return None
+        return game_history.id
+
+    @database_sync_to_async
+    def build_room_state_snapshot(self, room_id):
+        room = Room.objects.filter(room_id=room_id).first()
+        if room is None:
+            return {}
+
+        players = [room.player1, room.player2, room.player3, room.player4]
+        player_state = {}
+        for player_id in players:
+            if not player_id:
+                continue
+            player_obj = Player.objects.filter(player_id=player_id).first()
+            if player_obj is None:
+                continue
+            player_state[player_id] = {key: player_obj.__dict__[key] for key in tile_keys}
+
+        return {
+            "room_id": room.room_id,
+            "game_mode": room.game_mode,
+            "current_player": room.current_player,
+            "zhuangjia": room.zhuangjia,
+            "players": [player for player in players if player],
+            "room_tiles": {key: room.__dict__[key] for key in tile_keys},
+            "player_tiles": player_state,
+        }
+
+    @database_sync_to_async
+    def create_game_operation(
+        self,
+        game_history_id,
+        operation_type,
+        actor_username,
+        payload,
+        state_snapshot,
+    ):
+        with transaction.atomic():
+            current_max_sequence = (
+                GameOperation.objects.select_for_update()
+                .filter(game_history_id=game_history_id)
+                .aggregate(max_seq=Max("sequence"))
+                .get("max_seq")
+            ) or 0
+            operation = GameOperation.objects.create(
+                game_history_id=game_history_id,
+                sequence=current_max_sequence + 1,
+                operation_type=operation_type,
+                actor_username=actor_username or "",
+                payload=payload or {},
+                state_snapshot=state_snapshot or {},
+            )
+        return operation.sequence
+
+    async def record_game_operation(
+        self,
+        room_id,
+        operation_type,
+        actor_username="",
+        payload=None,
+    ):
+        game_history_id = await self.get_active_game_history_id(room_id)
+        if game_history_id is None:
+            return
+        await self.record_game_operation_by_game_id(
+            game_history_id=game_history_id,
+            room_id=room_id,
+            operation_type=operation_type,
+            actor_username=actor_username,
+            payload=payload,
+        )
+
+    async def record_game_operation_by_game_id(
+        self,
+        game_history_id,
+        room_id,
+        operation_type,
+        actor_username="",
+        payload=None,
+    ):
+        snapshot = await self.build_room_state_snapshot(room_id)
+        await self.create_game_operation(
+            game_history_id=game_history_id,
+            operation_type=operation_type,
+            actor_username=actor_username,
+            payload=payload or {},
+            state_snapshot=snapshot,
+        )
+
+    @database_sync_to_async
+    def finalize_game_result(self, room_id, winner_username=None):
+        game_history = (
+            GameHistory.objects.filter(
+                room_id_snapshot=str(room_id),
+                status=GameHistory.STATUS_IN_PROGRESS,
+            )
+            .order_by("-id")
+            .first()
+        )
+        if game_history is None:
+            return None
+
+        participants = [name for name in game_history.participants if name]
+        if not participants:
+            room = Room.objects.filter(room_id=room_id).first()
+            if room is not None:
+                participants = [
+                    player_name
+                    for player_name in [room.player1, room.player2, room.player3, room.player4]
+                    if player_name
+                ]
+
+        if winner_username and winner_username in participants:
+            game_history.status = GameHistory.STATUS_FINISHED
+            score_delta = {
+                username: 15 if username == winner_username else -5
+                for username in participants
+            }
+        else:
+            winner_username = None
+            game_history.status = GameHistory.STATUS_DRAW
+            score_delta = {username: 0 for username in participants}
+
+        winner_user = (
+            User.objects.filter(username=winner_username).first()
+            if winner_username
+            else None
+        )
+
+        game_history.winner = winner_user
+        game_history.ended_at = timezone.now()
+        game_history.score_delta = score_delta
+        game_history.save()
+
+        for username in participants:
+            user = User.objects.filter(username=username).first()
+            result = GameParticipantResult.RESULT_DRAW
+            if winner_username is not None:
+                result = (
+                    GameParticipantResult.RESULT_WIN
+                    if username == winner_username
+                    else GameParticipantResult.RESULT_LOSS
+                )
+
+            score_change = score_delta.get(username, 0)
+            total_score_after_game = score_change
+
+            if user is not None:
+                profile, _ = UserScoreProfile.objects.get_or_create(user=user)
+                profile.games_played += 1
+                if result == GameParticipantResult.RESULT_WIN:
+                    profile.wins += 1
+                elif result == GameParticipantResult.RESULT_LOSS:
+                    profile.losses += 1
+                else:
+                    profile.draws += 1
+                profile.total_score += score_change
+                profile.save()
+                total_score_after_game = profile.total_score
+
+            GameParticipantResult.objects.create(
+                game_history=game_history,
+                user=user,
+                username_snapshot=username,
+                result=result,
+                score_delta=score_change,
+                total_score_after_game=total_score_after_game,
+            )
+
+        return {
+            "game_id": game_history.id,
+            "score_delta": score_delta,
+            "status": game_history.status,
+        }

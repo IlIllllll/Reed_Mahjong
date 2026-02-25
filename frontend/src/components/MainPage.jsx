@@ -1,8 +1,9 @@
 import CreateRoomButton from "./CreateRoomButton";
 import JoinRoom from "./JoinRoom";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useEffect, useState } from "react";
 import { useSocket } from "./SocketProvider";
+import { useAuth } from "./UsernameProvider";
 
 export default function MainPage() {
   // const socket = null;
@@ -10,15 +11,41 @@ export default function MainPage() {
   //const setRoomNum = () => null;
   const socket = useSocket();
   const navigate = useNavigate();
+  const { user, stats, logout } = useAuth();
   const [roomNum, setRoomNum] = useState(0);
 
   // Setup room listener when Main Page is mounted
   useEffect(() => {
+    if (!socket) {
+      return;
+    }
     socket.addRoomListener(setRoomNum, navigate);
   }, [socket, navigate]);
 
   return (
     <div className="page mainPage">
+      <div className="mainPageTopBar">
+        <div>
+          <b>用户：</b>
+          {user?.username} | <b>积分：</b>
+          {stats?.total_score ?? 0}
+        </div>
+        <div className="mainPageActions">
+          <Link className="button" to="/history">
+            用户历史
+          </Link>
+          <button
+            type="button"
+            className="button"
+            onClick={() => {
+              logout();
+              navigate("/auth", { replace: true });
+            }}
+          >
+            退出登录
+          </button>
+        </div>
+      </div>
       <h3>Welcome to Reedies' Mahjong!</h3>
       <hr></hr>
       <CreateRoomButton socket={socket} />
